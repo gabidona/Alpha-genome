@@ -1,0 +1,83 @@
+#Install AlphaGenome
+
+# @markdown Run this cell to install AlphaGenome.
+from IPython.display import clear_output
+! pip install alphagenome
+clear_output()
+
+#Imports
+
+from alphagenome import colab_utils
+from alphagenome.data import gene_annotation
+from alphagenome.data import genome
+from alphagenome.data import transcript as transcript_utils
+from alphagenome.interpretation import ism
+from alphagenome.models import dna_client
+from alphagenome.models import variant_scorers
+from alphagenome.visualization import plot_components
+import matplotlib.pyplot as plt
+import pandas as pd
+
+#Predict variant effect
+
+variant = genome.Variant(
+    chromosome='chr20',
+    position=62270441,
+    reference_bases='CT',
+    alternate_bases='C',
+)
+
+interval = variant.reference_interval.resize(dna_client.SEQUENCE_LENGTH_1MB)
+
+print(f"Variant defined: {variant}")
+print(f"Interval resized to: {interval}")
+
+dna_model = dna_client.create(colab_utils.get_api_key())
+
+variant_output = dna_model.predict_variant(
+    interval=interval,
+    variant=variant,
+    requested_outputs=[dna_client.OutputType.RNA_SEQ],
+    ontology_terms=['UBERON:0001114'],  # Right liver lobe.
+)
+
+print(f"Reference RNA-seq predictions shape: {variant_output.reference.rna_seq.values.shape}")
+print(f"Alternate RNA-seq predictions shape: {variant_output.alternate.rna_seq.values.shape}")
+
+import pandas as pd
+from alphagenome.data import gene_annotation, transcript as transcript_utils
+
+# Re-initialize gtf and transcript_extractor
+gtf = pd.read_feather(
+    'https://storage.googleapis.com/alphagenome/reference/gencode/'
+    'hg38/gencode.v46.annotation.gtf.gz.feather'
+)
+
+# Set up transcript extractors using the information in the GTF file.
+# Mane select transcripts consists of of one curated transcript per locus.
+gtf_transcripts = gene_annotation.filter_protein_coding(gtf)
+gtf_transcripts = gene_annotation.filter_to_mane_select_transcript(gtf_transcripts)
+transcript_extractor = transcript_utils.TranscriptExtractor(gtf_transcripts)
+
+transcripts = transcript_extractor.extract(interval)
+print(f'Extracted {len(transcripts)} transcripts in this interval.')
+
+import matplotlib.pyplot as plt
+
+plot_components.plot(
+    [
+        plot_components.TranscriptAnnotation(transcripts),
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF': variant_output.reference.rna_seq,
+                'ALT': variant_output.alternate.rna_seq,
+            },
+            colors={'REF': 'dimgrey', 'ALT': 'red'},
+        ),
+    ],
+    interval=variant_output.reference.rna_seq.interval.resize(2**15),
+    annotations=[plot_components.VariantAnnotation([variant], alpha=0.8)],
+)
+plt.show()
+
+
