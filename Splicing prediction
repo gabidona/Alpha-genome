@@ -1,3 +1,34 @@
+# This cell expects 'splicing_variant' to be defined in a previous step.
+# Example: splicing_variant = genome.Variant(
+#     chromosome='chr1',
+#     position=216325499,
+#     reference_bases='G',
+#     alternate_bases='T',
+# )
+
+splicing_interval = splicing_variant.reference_interval.resize(dna_client.SEQUENCE_LENGTH_1MB)
+
+print(f"Variant for splicing prediction: {splicing_variant}")
+print(f"Interval for splicing prediction: {splicing_interval}")
+
+splicing_output = dna_model.predict_variant(
+    interval=splicing_interval,
+    variant=splicing_variant,
+    requested_outputs=[
+        dna_client.OutputType.SPLICE_SITES,
+        dna_client.OutputType.SPLICE_SITE_USAGE,
+        dna_client.OutputType.SPLICE_JUNCTIONS,
+    ],
+    ontology_terms=['UBERON:0001114'],  # Right liver lobe.
+)
+
+print(f"Reference splice sites predictions shape: {splicing_output.reference.splice_sites.values.shape}")
+print(f"Alternate splice sites predictions shape: {splicing_output.alternate.splice_sites.values.shape}")
+print(f"Reference splice junction predictions shape: {splicing_output.reference.splice_junctions.values.shape}")
+print(f"Alternate splice junction predictions shape: {splicing_output.alternate.splice_junctions.values.shape}")
+
+#Visualize in the graph
+
 import matplotlib.pyplot as plt
 
 # Create a smaller interval around the variant for zooming for splicing predictions
