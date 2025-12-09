@@ -1,0 +1,38 @@
+# Reusing the previously defined 'variant' and 'interval' for prediction.
+# If you wish to use a different variant, please redefine it before running this cell.
+
+print(f"Variant for ATAC prediction: {variant}")
+print(f"Interval for ATAC prediction: {interval}")
+
+atac_output = dna_model.predict_variant(
+    interval=interval,
+    variant=variant,
+    requested_outputs=[dna_client.OutputType.ATAC],
+    ontology_terms=['UBERON:0001114'],  # Right liver lobe (using a supported term)
+)
+
+print(f"Reference ATAC predictions shape: {atac_output.reference.atac.values.shape}")
+print(f"Alternate ATAC predictions shape: {atac_output.alternate.atac.values.shape}")
+
+import matplotlib.pyplot as plt
+
+# Create a smaller interval around the variant for zooming
+zoomed_interval_atac = atac_output.reference.atac.interval.resize(2**15)
+
+print("Visualizing ATAC predictions...")
+plot_components.plot(
+    [
+        plot_components.TranscriptAnnotation(transcripts), # Reuse existing hg38 transcripts
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF: ATAC': atac_output.reference.atac,
+                'ALT: ATAC': atac_output.alternate.atac,
+            },
+            colors={'REF: ATAC': 'dimgrey', 'ALT: ATAC': 'red'},
+            label='ATAC Signal',
+        ),
+    ],
+    interval=zoomed_interval_atac,
+    annotations=[plot_components.VariantAnnotation([variant], alpha=0.8)],
+)
+plt.show()
