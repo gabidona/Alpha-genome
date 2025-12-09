@@ -1,10 +1,10 @@
 #Predict variant effect
 
 variant = genome.Variant(
-    chromosome='chr20',
-    position=62270441,
-    reference_bases='CT',
-    alternate_bases='C',
+    chromosome='chr1',
+    position=216325499,
+    reference_bases='G',
+    alternate_bases='T',
 )
 
 interval = variant.reference_interval.resize(dna_client.SEQUENCE_LENGTH_1MB)
