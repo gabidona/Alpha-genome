@@ -1,0 +1,33 @@
+import matplotlib.pyplot as plt
+
+# Create a smaller interval around the variant for zooming for splicing predictions
+# Zooming in further to 2**12 for a more detailed view around the variant.
+zoomed_interval_splicing = splicing_output.reference.splice_sites.interval.resize(2**12)
+
+print("Visualizing splicing predictions with a closer zoom...")
+plot_components.plot(
+    [
+        plot_components.TranscriptAnnotation(transcripts), # Reuse existing hg38 transcripts
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF: Splice Sites': splicing_output.reference.splice_sites,
+                'ALT: Splice Sites': splicing_output.alternate.splice_sites,
+            },
+            colors={'REF: Splice Sites': 'dimgrey', 'ALT: Splice Sites': 'red'},
+            label='Splice Sites',
+        ),
+        # Removed OverlaidTracks for Splice Junctions as JunctionData is not compatible.
+        # The alphagenome library does not have a dedicated plotting component for JunctionData.
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF: Splice Site Usage': splicing_output.reference.splice_site_usage,
+                'ALT: Splice Site Usage': splicing_output.alternate.splice_site_usage,
+            },
+            colors={'REF: Splice Site Usage': 'dimgrey', 'ALT: Splice Site Usage': 'red'},
+            label='Splice Site Usage',
+        ),
+    ],
+    interval=zoomed_interval_splicing,
+    annotations=[plot_components.VariantAnnotation([splicing_variant], alpha=0.8)],
+)
+plt.show()
