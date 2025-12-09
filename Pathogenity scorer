@@ -1,0 +1,72 @@
+#1 Define the variant
+
+from alphagenome.data import genome
+from alphagenome.models import dna_client
+
+# Define the variant for which to calculate pathogenicity
+variant = genome.Variant(
+    chromosome='chr1',
+    position=216325499,
+    reference_bases='G',
+    alternate_bases='T',
+)
+
+# Create an interval around the variant for prediction
+interval = variant.reference_interval.resize(dna_client.SEQUENCE_LENGTH_1MB)
+
+print(f"Variant defined: {variant}")
+print(f"Interval for prediction: {interval}")
+
+#2 Initialize DNA Model and Predict Variant Effects
+
+from alphagenome import colab_utils
+
+# Initialize the DNA model
+dna_model = dna_client.create(colab_utils.get_api_key())
+
+# Predict variant effects for RNA-seq and Splice Sites
+pathogenicity_variant_output = dna_model.predict_variant(
+    interval=interval,
+    variant=variant,
+    requested_outputs=[
+        dna_client.OutputType.RNA_SEQ,
+        dna_client.OutputType.SPLICE_SITES,
+    ],
+    ontology_terms=['UBERON:0001114'],  # Right liver lobe.
+)
+
+print(f"Reference RNA-seq predictions shape: {pathogenicity_variant_output.reference.rna_seq.values.shape}")
+print(f"Alternate RNA-seq predictions shape: {pathogenicity_variant_output.alternate.rna_seq.values.shape}")
+print(f"Reference splice sites predictions shape: {pathogenicity_variant_output.reference.splice_sites.values.shape}")
+print(f"Alternate splice sites predictions shape: {pathogenicity_variant_output.alternate.splice_sites.values.shape}")
+
+#3 Calculate and Combine Scores for Pathogenicity
+
+# Calculate log-fold change for RNA-seq
+reference_rna_seq_values = pathogenicity_variant_output.reference.rna_seq.values
+alternate_rna_seq_values = pathogenicity_variant_output.alternate.rna_seq.values
+
+pseudocount = 1e-6
+lfc_rna_seq = np.log2((alternate_rna_seq_values + pseudocount) / (reference_rna_seq_values + pseudocount))
+
+rna_seq_score = np.mean(np.abs(lfc_rna_seq))
+
+# Calculate raw difference for Splice Sites
+reference_splice_sites_values = pathogenicity_variant_output.reference.splice_sites.values
+alternate_splice_sites_values = pathogenicity_variant_output.alternate.splice_sites.values
+
+diff_splice_sites = alternate_splice_sites_values - reference_splice_sites_values
+
+splice_site_score = np.mean(np.abs(diff_splice_sites))
+
+# Define weights for combining scores
+rna_seq_score_weight = 0.5
+splice_site_score_weight = 0.5
+
+# Calculate the combined pathogenicity score
+pathogenicity_score = (rna_seq_score * rna_seq_score_weight) + \
+                      (splice_site_score * splice_site_score_weight)
+
+print(f"RNA-seq mean absolute LFC: {rna_seq_score:.4f}")
+print(f"Splice site mean absolute difference: {splice_site_score:.4f}")
+print(f"Combined pathogenicity score for the variant: {pathogenicity_score:.4f}")
