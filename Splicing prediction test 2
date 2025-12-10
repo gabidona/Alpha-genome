@@ -1,0 +1,79 @@
+import matplotlib.pyplot as plt
+
+#Define the variant
+
+# Initialize the dna_model
+dna_model = dna_client.create(api_key=colab_utils.get_api_key())
+
+splicing_variant = genome.Variant(
+    chromosome='chr10',
+    position=102714363,
+    reference_bases='C',
+    alternate_bases='T',
+)
+
+splicing_interval = splicing_variant.reference_interval.resize(dna_client.SEQUENCE_LENGTH_1MB)
+
+print(f"Variant for splicing prediction: {splicing_variant}")
+print(f"Interval for splicing prediction: {splicing_interval}")
+
+splicing_output = dna_model.predict_variant(
+    interval=splicing_interval,
+    variant=splicing_variant,
+    requested_outputs=[
+        dna_client.OutputType.SPLICE_SITES,
+        dna_client.OutputType.SPLICE_SITE_USAGE,
+        dna_client.OutputType.SPLICE_JUNCTIONS,
+    ],
+    ontology_terms=['UBERON:0001114'],  # Right liver lobe.
+)
+
+print(f"Reference splice sites predictions shape: {splicing_output.reference.splice_sites.values.shape}")
+print(f"Alternate splice sites predictions shape: {splicing_output.alternate.splice_sites.values.shape}")
+print(f"Reference splice junction predictions shape: {splicing_output.reference.splice_junctions.values.shape}")
+print(f"Alternate splice junction predictions shape: {splicing_output.alternate.splice_junctions.values.shape}")
+
+#Visualize the result
+
+import matplotlib.pyplot as plt
+
+# Load transcripts using TranscriptExtractor
+# The TranscriptExtractor requires a GTF DataFrame (gtf_df).
+# Please load your GTF file into a pandas DataFrame here.
+# Example: gtf_df = pd.read_csv('your_gene_annotation.gtf', sep='\t', comment='#', header=None)
+
+# Placeholder DataFrame with expected columns to prevent AttributeError.
+# YOU MUST REPLACE THIS WITH YOUR ACTUAL GTF DATA LOADING.
+gtfs_df = pd.DataFrame(columns=['Chromosome', 'Start', 'End', 'Strand', 'Feature', 'transcript_id'])
+transcript_extractor = transcript_utils.TranscriptExtractor(gtf_df=gtfs_df)
+transcripts = transcript_extractor.extract(interval=splicing_interval)
+
+# Create a smaller interval around the variant for zooming for splicing predictions
+# Zooming in further to 2**12 for a more detailed view around the variant.
+zoomed_interval_splicing = splicing_output.reference.splice_sites.interval.resize(2**12)
+
+print("Visualizing splicing predictions with a closer zoom...")
+plot_components.plot(
+    [
+        plot_components.TranscriptAnnotation(transcripts), # Use loaded transcripts
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF: Splice Sites': splicing_output.reference.splice_sites,
+                'ALT: Splice Sites': splicing_output.alternate.splice_sites,
+            },
+            colors={'REF: Splice Sites': 'dimgrey', 'ALT: Splice Sites': 'red'},
+            label='Splice Sites',
+        ),
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF: Splice Site Usage': splicing_output.reference.splice_site_usage,
+                'ALT: Splice Site Usage': splicing_output.alternate.splice_site_usage,
+            },
+            colors={'REF: Splice Site Usage': 'dimgrey', 'ALT: Splice Site Usage': 'red'},
+            label='Splice Site Usage',
+        ),
+    ],
+    interval=zoomed_interval_splicing,
+    annotations=[plot_components.VariantAnnotation([splicing_variant], alpha=0.8)],
+)
+plt.show()
