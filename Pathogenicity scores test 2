@@ -176,7 +176,6 @@ user_interval = user_variant.reference_interval.resize(dna_client.SEQUENCE_LENGT
 
 # 5. Calculate AlphaGenome Score
 user_alphagenome_score = calculate_alphagenome_score(user_variant, user_interval, dna_model)
-print(f"AlphaGenome pathogenicity score: {user_alphagenome_score:.6f}")
 
 # 6. Generate Dummy Scores for External Predictors (for demonstration only)
 # For a real application, these would be retrieved from actual databases/tools
@@ -191,16 +190,34 @@ user_polyphen_score = np.random.uniform(0.0, 1.0)
 user_revel_score = np.random.uniform(0.0, 1.0)
 user_spliceai_score = np.random.uniform(0.0, 1.0)
 
-print("\n--- Dummy External Scores (Illustrative Only) ---")
-print(f"CADD score: {user_cadd_score:.4f}")
-print(f"phyloP score: {user_phylop_score:.4f}")
-print(f"SIFT score: {user_sift_score:.4f}")
-print(f"PolyPhen score: {user_polyphen_score:.4f}")
-print(f"REVEL score: {user_revel_score:.4f}")
-print(f"SpliceAI score: {user_spliceai_score:.4f}")
-print("--------------------------------------------------")
+# 7. Display all scores in a table
+all_scores_data = {
+    'Score Type': [
+        'AlphaGenome Score',
+        'CADD score (Dummy)',
+        'phyloP score (Dummy)',
+        'SIFT score (Dummy)',
+        'PolyPhen score (Dummy)',
+        'REVEL score (Dummy)',
+        'SpliceAI score (Dummy)'
+    ],
+    'Value': [
+        f"{user_alphagenome_score:.6f}",
+        f"{user_cadd_score:.4f}",
+        f"{user_phylop_score:.4f}",
+        f"{user_sift_score:.4f}",
+        f"{user_polyphen_score:.4f}",
+        f"{user_revel_score:.4f}",
+        f"{user_spliceai_score:.4f}"
+    ]
+}
+scores_df = pd.DataFrame(all_scores_data)
 
-# 7. Apply Multi-Score Classification
+print("\n--- Variant Scores ---")
+print(scores_df.to_markdown(index=False))
+print("----------------------")
+
+# 8. Apply Multi-Score Classification
 # Create a temporary DataFrame for the user variant to apply the classification function
 user_variant_data = {
     'chromosome': [user_chromosome],
@@ -219,4 +236,15 @@ user_variant_df = pd.DataFrame(user_variant_data)
 
 final_classification = user_variant_df.apply(classify_variant_updated, axis=1).iloc[0]
 
-print(f"\nFinal Multi-Score Classification for {user_variant}: {final_classification}")
+# Define colors for output
+colors = {
+    'likely benign': '\033[92m',  # Green
+    'benign': '\033[94m',       # Blue
+    'uncertain': '\033[93m',    # Yellow
+    'possible deleterious': '\033[95m', # Magenta/Pink
+    'deleterious': '\033[91m'    # Red
+}
+ENDC = '\033[0m' # Reset color
+
+colored_classification = colors.get(final_classification, ENDC) + final_classification + ENDC
+print(f"\nFinal Multi-Score Classification for {user_variant}: {colored_classification}")
