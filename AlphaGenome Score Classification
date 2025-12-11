@@ -1,0 +1,5 @@
+Deleterious: If alphagenome_score > 0.0045
+Possible Deleterious: If 0.0035 < alphagenome_score <= 0.0045
+Uncertain: If 0.0025 < alphagenome_score <= 0.0035
+Benign: If 0.0015 < alphagenome_score <= 0.0025
+Likely Benign: If alphagenome_score <= 0.0015
