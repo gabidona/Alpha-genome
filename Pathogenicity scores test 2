@@ -1,0 +1,222 @@
+#@title Full Script for Variant Pathogenicity Scoring
+import numpy as np
+import pandas as pd
+from alphagenome import colab_utils
+from alphagenome.data import genome
+from alphagenome.models import dna_client
+
+# 1. Initialize DNA Model
+dna_model = dna_client.create(colab_utils.get_api_key())
+print("DNA model initialized successfully.")
+
+# 2. Define AlphaGenome Scoring Function
+def calculate_alphagenome_score(variant, interval, dna_model):
+    """
+    Calculates an AlphaGenome pathogenicity score for a given variant.
+
+    Args:
+        variant (alphagenome.data.genome.Variant): The variant to score.
+        interval (alphagenome.data.genome.Interval): The genomic interval for prediction.
+        dna_model: The initialized AlphaGenome DNA model.
+
+    Returns:
+        float: The combined AlphaGenome pathogenicity score.
+    """
+    # Predict variant effects for RNA-seq and Splice Sites
+    variant_output = dna_model.predict_variant(
+        interval=interval,
+        variant=variant,
+        requested_outputs=[
+            dna_client.OutputType.RNA_SEQ,
+            dna_client.OutputType.SPLICE_SITES,
+        ],
+        ontology_terms=['UBERON:0001114'],  # Right liver lobe.
+    )
+
+    # Extract values
+    reference_rna_seq_values = variant_output.reference.rna_seq.values
+    alternate_rna_seq_values = variant_output.alternate.rna_seq.values
+    reference_splice_sites_values = variant_output.reference.splice_sites.values
+    alternate_splice_sites_values = variant_output.alternate.splice_sites.values
+
+    pseudocount = 1e-6
+    rna_seq_score_weight = 0.5
+    splice_site_score_weight = 0.5
+
+    # Calculate log-fold change for RNA-seq and mean absolute LFC
+    lfc_rna_seq = np.log2((alternate_rna_seq_values + pseudocount) / (reference_rna_seq_values + pseudocount))
+    rna_seq_score = np.mean(np.abs(lfc_rna_seq))
+
+    # Calculate raw difference for Splice Sites and mean absolute difference
+    diff_splice_sites = alternate_splice_sites_values - reference_splice_sites_values
+    splice_site_score = np.mean(np.abs(diff_splice_sites))
+
+    # Calculate the combined pathogenicity score
+    combined_pathogenicity_score = \
+        (rna_seq_score * rna_seq_score_weight) + \
+        (splice_site_score * splice_site_score_weight)
+
+    return combined_pathogenicity_score
+
+# 3. Define Multi-Score Classification Function
+def classify_variant_updated(row):
+    deleterious_counts = 0
+    possible_deleterious_counts = 0
+    uncertain_counts = 0
+    benign_counts = 0
+    likely_benign_counts = 0
+
+    def assign_category(score, thresholds):
+        if len(thresholds) == 3:
+            del_th, pd_th, un_th = thresholds
+            if score > del_th: return 'deleterious'
+            elif score > pd_th: return 'possible deleterious'
+            elif score > un_th: return 'uncertain'
+            else: return 'benign'
+        elif len(thresholds) == 4:
+            del_th, pd_th, un_th, lb_th = thresholds
+            if score > del_th: return 'deleterious'
+            elif score > pd_th: return 'possible deleterious'
+            elif score > un_th: return 'uncertain'
+            elif score < lb_th: return 'likely benign'
+            else: return 'benign'
+        return 'unknown'
+
+    # Evaluate CADD score
+    cadd_category = assign_category(row['cadd_score'], (20, 10, 5))
+    if cadd_category == 'deleterious': deleterious_counts += 1
+    elif cadd_category == 'possible deleterious': possible_deleterious_counts += 1
+    elif cadd_category == 'uncertain': uncertain_counts += 1
+    else: benign_counts += 1
+
+    # Evaluate AlphaGenome score
+    alphagenome_category = assign_category(row['alphagenome_score'], (0.0045, 0.0035, 0.0025))
+    if alphagenome_category == 'deleterious': deleterious_counts += 1
+    elif alphagenome_category == 'possible deleterious': possible_deleterious_counts += 1
+    elif alphagenome_category == 'uncertain': uncertain_counts += 1
+    else: benign_counts += 1
+
+    # Evaluate phyloP score
+    phylop_score = row['phyloP_score']
+    if phylop_score > 7: phylop_category = 'deleterious'
+    elif phylop_score > 3: phylop_category = 'possible deleterious'
+    elif phylop_score > 1: phylop_category = 'uncertain'
+    elif phylop_score <= -1: phylop_category = 'likely benign'
+    else: phylop_category = 'benign'
+    if phylop_category == 'deleterious': deleterious_counts += 1
+    elif phylop_category == 'possible deleterious': possible_deleterious_counts += 1
+    elif phylop_category == 'uncertain': uncertain_counts += 1
+    elif phylop_category == 'benign': benign_counts += 1
+    else: likely_benign_counts += 1
+
+    # Evaluate SIFT score
+    sift_score = row['SIFT_score']
+    if sift_score <= 0.01: sift_category = 'deleterious'
+    elif sift_score <= 0.05: sift_category = 'possible deleterious'
+    elif sift_score <= 0.1: sift_category = 'uncertain'
+    else: sift_category = 'benign'
+    if sift_category == 'deleterious': deleterious_counts += 1
+    elif sift_category == 'possible deleterious': possible_deleterious_counts += 1
+    elif sift_category == 'uncertain': uncertain_counts += 1
+    else: benign_counts += 1
+
+    # Evaluate PolyPhen score
+    polyphen_category = assign_category(row['polyPhen_score'], (0.85, 0.4, 0.15))
+    if polyphen_category == 'deleterious': deleterious_counts += 1
+    elif polyphen_category == 'possible deleterious': possible_deleterious_counts += 1
+    elif polyphen_category == 'uncertain': uncertain_counts += 1
+    else: benign_counts += 1
+
+    # Evaluate REVEL score
+    revel_category = assign_category(row['REVEL_score'], (0.75, 0.5, 0.25))
+    if revel_category == 'deleterious': deleterious_counts += 1
+    elif revel_category == 'possible deleterious': possible_deleterious_counts += 1
+    elif revel_category == 'uncertain': uncertain_counts += 1
+    else: benign_counts += 1
+
+    # Evaluate SpliceAI score
+    spliceai_category = assign_category(row['SpliceAI_score'], (0.6, 0.2, 0.05))
+    if spliceai_category == 'deleterious': deleterious_counts += 1
+    elif spliceai_category == 'possible deleterious': possible_deleterious_counts += 1
+    elif spliceai_category == 'uncertain': uncertain_counts += 1
+    else: benign_counts += 1
+
+    # Combined classification logic
+    if deleterious_counts >= 3:
+        return 'deleterious'
+    elif deleterious_counts >= 1 and possible_deleterious_counts >= 1:
+        return 'possible deleterious'
+    elif possible_deleterious_counts >= 3:
+        return 'possible deleterious'
+    elif likely_benign_counts >= 2:
+        return 'likely benign'
+    elif benign_counts >= 4 and deleterious_counts == 0 and possible_deleterious_counts == 0:
+        return 'benign'
+    else:
+        return 'uncertain'
+
+# 4. User Input for Variant
+# @title Define your variant (modify these values to score a different variant)
+user_chromosome = 'chrX' # @param {type: "string"}
+user_position = 118597511 # @param {type: "integer"}
+user_reference_bases = 'C' # @param {type: "string"}
+user_alternate_bases = 'T' # @param {type: "string"}
+
+# Create a genome.Variant object
+user_variant = genome.Variant(
+    chromosome=user_chromosome,
+    position=user_position,
+    reference_bases=user_reference_bases,
+    alternate_bases=user_alternate_bases,
+)
+print(f"\nUser-defined variant: {user_variant}")
+
+# Create the genomic interval for AlphaGenome prediction
+user_interval = user_variant.reference_interval.resize(dna_client.SEQUENCE_LENGTH_1MB)
+
+# 5. Calculate AlphaGenome Score
+user_alphagenome_score = calculate_alphagenome_score(user_variant, user_interval, dna_model)
+print(f"AlphaGenome pathogenicity score: {user_alphagenome_score:.6f}")
+
+# 6. Generate Dummy Scores for External Predictors (for demonstration only)
+# For a real application, these would be retrieved from actual databases/tools
+np.random.seed(42) # for reproducibility of dummy scores
+
+# These dummy scores are just illustrative and do not reflect real predictions for the user_variant
+# They are generated to allow the classification logic to run.
+user_cadd_score = np.random.uniform(0.1, 50.0)
+user_phylop_score = np.random.uniform(-5.0, 10.0)
+user_sift_score = np.random.uniform(0.0001, 1.0)
+user_polyphen_score = np.random.uniform(0.0, 1.0)
+user_revel_score = np.random.uniform(0.0, 1.0)
+user_spliceai_score = np.random.uniform(0.0, 1.0)
+
+print("\n--- Dummy External Scores (Illustrative Only) ---")
+print(f"CADD score: {user_cadd_score:.4f}")
+print(f"phyloP score: {user_phylop_score:.4f}")
+print(f"SIFT score: {user_sift_score:.4f}")
+print(f"PolyPhen score: {user_polyphen_score:.4f}")
+print(f"REVEL score: {user_revel_score:.4f}")
+print(f"SpliceAI score: {user_spliceai_score:.4f}")
+print("--------------------------------------------------")
+
+# 7. Apply Multi-Score Classification
+# Create a temporary DataFrame for the user variant to apply the classification function
+user_variant_data = {
+    'chromosome': [user_chromosome],
+    'position': [user_position],
+    'reference_allele': [user_reference_bases],
+    'alternate_allele': [user_alternate_bases],
+    'alphagenome_score': [user_alphagenome_score],
+    'cadd_score': [user_cadd_score],
+    'phyloP_score': [user_phylop_score],
+    'SIFT_score': [user_sift_score],
+    'polyPhen_score': [user_polyphen_score],
+    'REVEL_score': [user_revel_score],
+    'SpliceAI_score': [user_spliceai_score]
+}
+user_variant_df = pd.DataFrame(user_variant_data)
+
+final_classification = user_variant_df.apply(classify_variant_updated, axis=1).iloc[0]
+
+print(f"\nFinal Multi-Score Classification for {user_variant}: {final_classification}")
