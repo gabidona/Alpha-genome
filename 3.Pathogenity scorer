@@ -2,12 +2,13 @@
 
 from alphagenome.data import genome
 from alphagenome.models import dna_client
+import numpy as np
 
 # Define the variant for which to calculate pathogenicity
 variant = genome.Variant(
-    chromosome='chr1',
-    position=216325499,
-    reference_bases='G',
+    chromosome='chrX',
+    position=118597511,
+    reference_bases='C',
     alternate_bases='T',
 )
 
