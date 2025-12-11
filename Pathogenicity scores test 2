@@ -66,6 +66,9 @@ def classify_variant_updated(row):
     benign_counts = 0
     likely_benign_counts = 0
 
+    # Variable to store individual AlphaGenome classification
+    alphagenome_individual_category = 'unknown'
+
     def assign_category(score, thresholds):
         if len(thresholds) == 3:
             del_th, pd_th, un_th = thresholds
@@ -91,6 +94,7 @@ def classify_variant_updated(row):
 
     # Evaluate AlphaGenome score
     alphagenome_category = assign_category(row['alphagenome_score'], (0.0045, 0.0035, 0.0025))
+    alphagenome_individual_category = alphagenome_category # Store individual category
     if alphagenome_category == 'deleterious': deleterious_counts += 1
     elif alphagenome_category == 'possible deleterious': possible_deleterious_counts += 1
     elif alphagenome_category == 'uncertain': uncertain_counts += 1
@@ -143,17 +147,23 @@ def classify_variant_updated(row):
 
     # Combined classification logic
     if deleterious_counts >= 3:
-        return 'deleterious'
+        final_classification = 'deleterious'
     elif deleterious_counts >= 1 and possible_deleterious_counts >= 1:
-        return 'possible deleterious'
+        final_classification = 'possible deleterious'
     elif possible_deleterious_counts >= 3:
-        return 'possible deleterious'
+        final_classification = 'possible deleterious'
     elif likely_benign_counts >= 2:
-        return 'likely benign'
+        final_classification = 'likely benign'
     elif benign_counts >= 4 and deleterious_counts == 0 and possible_deleterious_counts == 0:
-        return 'benign'
+        final_classification = 'benign'
     else:
-        return 'uncertain'
+        final_classification = 'uncertain'
+
+    # Return a Series with named results for easier extraction
+    return pd.Series({
+        'final_classification': final_classification,
+        'alphagenome_individual_classification': alphagenome_individual_category
+    })
 
 # 4. User Input for Variant
 # @title Define your variant (modify these values to score a different variant)
@@ -234,7 +244,10 @@ user_variant_data = {
 }
 user_variant_df = pd.DataFrame(user_variant_data)
 
-final_classification = user_variant_df.apply(classify_variant_updated, axis=1).iloc[0]
+# Apply the classification function and extract results using named keys
+classification_results = user_variant_df.apply(lambda row: classify_variant_updated(row), axis=1).iloc[0]
+final_classification = classification_results['final_classification']
+alphagenome_individual_classification = classification_results['alphagenome_individual_classification']
 
 # Define colors for output
 colors = {
@@ -246,5 +259,8 @@ colors = {
 }
 ENDC = '\033[0m' # Reset color
 
-colored_classification = colors.get(final_classification, ENDC) + final_classification + ENDC
-print(f"\nFinal Multi-Score Classification for {user_variant}: {colored_classification}")
+colored_final_classification = colors.get(final_classification, ENDC) + final_classification + ENDC
+colored_alphagenome_classification = colors.get(alphagenome_individual_classification, ENDC) + alphagenome_individual_classification + ENDC
+
+print(f"\nIndividual AlphaGenome Score Classification: {colored_alphagenome_classification}")
+print(f"Final Multi-Score Classification for {user_variant}: {colored_final_classification}")
