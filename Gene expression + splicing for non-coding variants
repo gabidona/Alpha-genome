@@ -1,0 +1,95 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+from alphagenome.data import gene_annotation, transcript as transcript_utils
+from alphagenome.visualization import plot_components
+from alphagenome.data import genome
+from alphagenome.models import dna_client
+from alphagenome import colab_utils
+
+# Initialize the dna_model (re-initializing for robustness in a single cell context)
+dna_model = dna_client.create(colab_utils.get_api_key())
+print("DNA model initialized.")
+
+# --- 1. Define a Non-Coding Variant (from cell bf794a6c) ---
+# @title Define your non-coding variant
+# You can change these values to specify the non-coding variant you want to score.
+chromosome = 'chr1' # @param {type: "string"}
+position = 100000 # @param {type: "integer"}
+reference_bases = 'A' # @param {type: "string"}
+alternate_bases = 'T' # @param {type: "string"}
+
+# Create a genome.Variant object
+non_coding_variant = genome.Variant(
+    chromosome=chromosome,
+    position=position,
+    reference_bases=reference_bases,
+    alternate_bases=alternate_bases,
+)
+
+print(f"Defined non-coding variant: {non_coding_variant}")
+
+# --- 2. Predict Variant Effect with AlphaGenome (from cell 09e792f4) ---
+# Define the genomic interval for prediction
+interval = non_coding_variant.reference_interval.resize(dna_client.SEQUENCE_LENGTH_1MB)
+
+print(f"Genomic interval for non-coding variant prediction: {interval}")
+
+# Call the dna_model.predict_variant method
+non_coding_variant_output = dna_model.predict_variant(
+    interval=interval,
+    variant=non_coding_variant,
+    requested_outputs=[
+        dna_client.OutputType.RNA_SEQ,
+        dna_client.OutputType.SPLICE_SITES,
+    ],
+    ontology_terms=['UBERON:0001114'],  # Right liver lobe.
+)
+
+print(f"Reference RNA-seq predictions shape: {non_coding_variant_output.reference.rna_seq.values.shape}")
+print(f"Alternate RNA-seq predictions shape: {non_coding_variant_output.alternate.rna_seq.values.shape}")
+print(f"Reference splice sites predictions shape: {non_coding_variant_output.reference.splice_sites.values.shape}")
+print(f"Alternate splice sites predictions shape: {non_coding_variant_output.alternate.splice_sites.values.shape}")
+
+# --- 3. Visualize Predicted Effects (from cell 946ca88d) ---
+# Re-initialize gtf and transcript_extractor for robustness, if not already in scope
+# This part assumes gtf_transcripts can be re-created from the public URL if needed.
+# In a real scenario, this would ideally be loaded once or passed as a parameter.
+# For this visualization, we need the GTF to show transcript annotations.
+gtf = pd.read_feather(
+    'https://storage.googleapis.com/alphagenome/reference/gencode/'
+    'hg38/gencode.v46.annotation.gtf.gz.feather'
+)
+gtf_transcripts = gene_annotation.filter_protein_coding(gtf)
+gtf_transcripts = gene_annotation.filter_to_mane_select_transcript(gtf_transcripts)
+transcript_extractor = transcript_utils.TranscriptExtractor(gtf_transcripts)
+
+# Extract transcripts for the interval around the non-coding variant
+transcripts = transcript_extractor.extract(interval)
+
+# Create the plot
+plt.figure(figsize=(15, 8))
+plot_components.plot(
+    [
+        plot_components.TranscriptAnnotation(transcripts),
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF': non_coding_variant_output.reference.rna_seq,
+                'ALT': non_coding_variant_output.alternate.rna_seq,
+            },
+            colors={'REF': 'dimgrey', 'ALT': 'red'},
+            label='RNA-seq'
+        ),
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF_SS': non_coding_variant_output.reference.splice_sites,
+                'ALT_SS': non_coding_variant_output.alternate.splice_sites,
+            },
+            colors={'REF_SS': 'blue', 'ALT_SS': 'orange'},
+            label='Splice Sites'
+        ),
+    ],
+    interval=non_coding_variant_output.reference.rna_seq.interval.resize(2**15),
+    annotations=[plot_components.VariantAnnotation([non_coding_variant], alpha=0.8)],
+)
+plt.title(f'Predicted Effects of Non-Coding Variant {non_coding_variant}')
+plt.show()
