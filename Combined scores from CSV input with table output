@@ -1,0 +1,95 @@
+import pandas as pd
+
+# --- Step 1: Load Variants  ---
+
+# Load variants from the provided CSV file
+variants_df = pd.read_csv('/content/ABCA4variants_AlpahGenome.csv')
+
+
+# --- Step 2: Process Variants and Generate Scores ---
+
+# List to store results for all variants
+all_rna_seq_scores = []
+all_splice_scores_general = []
+
+print("\nProcessing variants with corrected position:")
+for index, row in variants_df.iterrows():
+    # Ensure position is an integer
+    variant_position = int(row['position'])
+    # Ensure chromosome is a string with 'chr' prefix
+    variant_chromosome = str(row['chrom'])
+    if not variant_chromosome.startswith('chr'):
+        variant_chromosome = f'chr{variant_chromosome}'
+
+    # Validate variant position (already corrected, but good practice to keep)
+    if variant_position < 1:
+        print(f"\nSkipping variant {index + 1}: {variant_chromosome}:{variant_position}{row['reference_bases']}>{row['alternate_bases']} (Position must be >= 1)")
+        continue
+
+    print(f"\nProcessing variant {index + 1}: {variant_chromosome}:{variant_position}{row['reference_bases']}>{row['alternate_bases']}")
+
+    # Get RNA_SEQ scores
+    rna_seq_scores = get_variant_scores(
+        chromosome=variant_chromosome,
+        position=variant_position,
+        reference_bases=row['reference_bases'],
+        alternate_bases=row['alternate_bases'],
+        requested_output_type=dna_client.OutputType.RNA_SEQ,
+        variant_scorer_key='RNA_SEQ',
+        ontology_terms=['UBERON:0000019'] # Camera-type eye
+    )
+    # Add variant identifier to the scores
+    rna_seq_scores['variant_id'] = f"{variant_chromosome}:{variant_position}{row['reference_bases']}>{row['alternate_bases']}"
+    all_rna_seq_scores.append(rna_seq_scores)
+
+    # Get general SPLICE_SITES scores
+    splice_scores = get_variant_scores(
+        chromosome=variant_chromosome,
+        position=variant_position,
+        reference_bases=row['reference_bases'],
+        alternate_bases=row['alternate_bases'],
+        requested_output_type=dna_client.OutputType.SPLICE_SITES,
+        variant_scorer_key='SPLICE_SITES',
+        ontology_terms=['UBERON:0000019'] # Camera-type eye
+    )
+    # Add variant identifier to the scores
+    splice_scores['variant_id'] = f"{variant_chromosome}:{variant_position}{row['reference_bases']}>{row['alternate_bases']}"
+    all_splice_scores_general.append(splice_scores)
+
+# Concatenate all results into a single DataFrame
+final_rna_seq_scores_df = pd.concat(all_rna_seq_scores, ignore_index=True)
+final_splice_scores_df = pd.concat(all_splice_scores_general, ignore_index=True)
+
+# --- Step 3: Prepare Splice Site Data ---
+
+donor_scores_df = final_splice_scores_df[final_splice_scores_df['track_name'] == 'donor'][['variant_id', 'raw_score']].rename(columns={'raw_score': 'donor splice site score'})
+acceptor_scores_df = final_splice_scores_df[final_splice_scores_df['track_name'] == 'acceptor'][['variant_id', 'raw_score']].rename(columns={'raw_score': 'acceptor splice site score'})
+splice_scores_pivoted_df = pd.merge(donor_scores_df, acceptor_scores_df, on='variant_id', how='outer')
+
+# --- Step 4: Prepare RNA-seq Data for ABCA4 ---
+
+abca4_rna_seq_scores_df = final_rna_seq_scores_df[final_rna_seq_scores_df['gene_name'] == 'ABCA4'][['variant_id', 'raw_score', 'gene_name']].rename(columns={'raw_score': 'ABCA4 RNA-seq score'})
+
+# --- Step 5: Combine and Display Results ---
+
+combined_scores_df = pd.merge(splice_scores_pivoted_df, abca4_rna_seq_scores_df, on='variant_id', how='left')
+
+# Define the desired order of columns
+desired_column_order = [
+    'variant_id',
+    'acceptor splice site score',
+    'donor splice site score',
+    'ABCA4 RNA-seq score',
+    'gene_name'
+]
+# Reindex the DataFrame with the new column order
+combined_scores_df = combined_scores_df[desired_column_order]
+
+print("\n--- Final Combined Scores Table (All Variants) ---")
+display(combined_scores_df)
+
+# --- Step 6: Save the table to CSV ---
+output_filename = 'combined_variant_scores.csv'
+combined_scores_df.to_csv(output_filename, index=False)
+
+print(f"\nThe complete table has been saved to '{output_filename}'. You can download it from the Colab file browser.")
