@@ -1,0 +1,406 @@
+# Imports
+import anndata
+from alphagenome import colab_utils
+from alphagenome.data import gene_annotation
+from alphagenome.data import genome
+from alphagenome.data import transcript as transcript_utils
+from alphagenome.models import dna_client
+import pandas as pd
+
+# Consolidate all steps into a single function
+def get_variant_scores(
+    chromosome,
+    position,
+    reference_bases,
+    alternate_bases,
+    requested_output_type,
+    ontology_terms=['UBERON:0000019'],
+    custom_prediction_interval_chr=None,
+    custom_prediction_interval_start=None,
+    custom_prediction_interval_end=None,
+    custom_prediction_interval_strand=None
+):
+    # 1. Initialize DNA model (using your API key)
+    dna_model = dna_client.create(colab_utils.get_api_key())
+
+    # 2. Load GTF file and set up transcript extractor
+    gtf = pd.read_feather(
+        'https://storage.googleapis.com/alphagenome/reference/gencode/'
+        'hg38/gencode.v46.annotation.gtf.gz.feather'
+    )
+    gtf_transcripts = gene_annotation.filter_protein_coding(gtf)
+    gtf_transcripts = gene_annotation.filter_to_mane_select_transcript(gtf_transcripts)
+    transcript_extractor = transcript_utils.TranscriptExtractor(gtf_transcripts)
+
+    # 3. Define the variant
+    variant = genome.Variant(
+        chromosome=chromosome,
+        position=position,
+        reference_bases=reference_bases,
+        alternate_bases=alternate_bases,
+    )
+
+    # 4. Determine the interval for prediction
+    if (
+        custom_prediction_interval_chr is not None
+        and custom_prediction_interval_start is not None
+        and custom_prediction_interval_end is not None
+    ):
+        # User provided a custom interval
+        interval = genome.Interval(
+            chromosome=custom_prediction_interval_chr,
+            start=custom_prediction_interval_start,
+            end=custom_prediction_interval_end,
+            strand=custom_prediction_interval_strand if custom_prediction_interval_strand is not None else '.',
+            name=f"Custom prediction interval for {chromosome}:{position}{reference_bases}>{alternate_bases}"
+        )
+        # It's good practice to ensure the variant is within this interval.
+        # If not, the model might not function as expected or raise an error.
+        if not interval.contains(variant.reference_interval):
+             raise ValueError(
+                 f"Variant {variant} is not contained within the custom prediction interval {interval}"
+             )
+    else:
+        # Default behavior: create a a 1MB region centered around the variant
+        interval = variant.reference_interval.resize(dna_client.SEQUENCE_LENGTH_1MB)
+
+    # 5. Predict variant effects to get raw reference and alternative scores
+    prediction_result = dna_model.predict_variant(
+        interval=interval,
+        variant=variant,
+        requested_outputs=[requested_output_type],
+        ontology_terms=ontology_terms,
+    )
+
+    print(f"  Inside get_variant_scores for {variant.chromosome}:{variant.position}{variant.reference_bases}>{variant.alternate_bases} - Requested: {requested_output_type}")
+    print(f"  prediction_result object: {prediction_result}")
+
+    # Initialize empty DataFrames for all possible outputs
+    rna_seq_reference_predictions_df = pd.DataFrame()
+    rna_seq_alternative_predictions_df = pd.DataFrame()
+    splice_site_reference_predictions_df = pd.DataFrame()
+    splice_site_alternative_predictions_df = pd.DataFrame()
+
+    # Helper function to process AnnData or TrackData objects into tidy DataFrames
+    def process_output_data(data_obj, output_type_str, allele_type_str):
+        df_list = []
+        if data_obj is None:
+            return pd.DataFrame()
+
+        # Handle AnnData object (expected for RNA_SEQ_GENE_EXPRESSION)
+        if isinstance(data_obj, anndata.AnnData):
+            adata = data_obj
+            print(f"    Processing AnnData for {output_type_str}, allele: {allele_type_str} - var.empty={adata.var.empty}, obs.empty={adata.obs.empty}")
+            if not adata.var.empty and not adata.obs.empty:
+                layer = adata.X # Assuming data is in .X layer for simpler AnnData processing
+                df = pd.DataFrame(layer, index=adata.obs_names, columns=adata.var_names)
+
+                df_melted = df.reset_index().rename(columns={'index': 'track_id'})
+                df_melted = df_melted.melt(id_vars=['track_id'], var_name='var_id', value_name='raw_score')
+
+                obs_cols = ['ontology_curie', 'biosample_name', 'track_name']
+                obs_annotations = adata.obs[[col for col in obs_cols if col in adata.obs.columns]].reset_index().rename(columns={'index': 'track_id'})
+                df_melted = df_melted.merge(obs_annotations, on='track_id', how='left')
+
+                var_cols_to_merge = ['gene_name']
+                # The current SPLICE_SITES returns TrackData, so this block is primarily for AnnData based outputs with junction info
+                if output_type_str == 'SPLICE_SITES_GENE_EXPRESSION': # If this output type was requested and returns AnnData
+                    if 'junction_start' in adata.var.columns:
+                        var_cols_to_merge.append('junction_start')
+                    if 'junction_end' in adata.var.columns:
+                        var_cols_to_merge.append('junction_end')
+
+                if any(col in adata.var.columns for col in var_cols_to_merge):
+                    var_annotations = adata.var[[col for col in var_cols_to_merge if col in adata.var.columns]].reset_index().rename(columns={'index': 'var_id'})
+                    df_melted = df_melted.merge(var_annotations, on='var_id', how='left')
+
+                if 'gene_name' not in df_melted.columns:
+                    df_melted['gene_name'] = df_melted['var_id'] # Use var_id as gene_name if not explicitly present
+
+                if 'junction_start' in df_melted.columns:
+                    df_melted.rename(columns={'junction_start': 'junction_Start'}, inplace=True)
+                if 'junction_end' in df_melted.columns:
+                    df_melted.rename(columns={'junction_end': 'junction_End'}, inplace=True)
+
+                df_melted['output_type'] = output_type_str
+                df_melted['allele_type'] = allele_type_str
+
+                final_cols = ['gene_name', 'raw_score', 'output_type', 'allele_type', 'ontology_curie', 'biosample_name', 'track_name']
+                if output_type_str == 'SPLICE_SITES_GENE_EXPRESSION':
+                    final_cols.extend(['junction_Start', 'junction_End'])
+
+                df_list.append(df_melted[[col for col in final_cols if col in df_melted.columns]].copy())
+
+        # Handle TrackData object (expected for SPLICE_SITES and base-level RNA_SEQ)
+        # Check for attributes characteristic of TrackData: 'values' and 'metadata'
+        # and ensure it's not an AnnData object (already handled above) by checking for 'X' attribute
+        elif hasattr(data_obj, 'values') and hasattr(data_obj, 'metadata') and not hasattr(data_obj, 'X'):
+            track_data = data_obj
+            print(f"    Processing TrackData for {output_type_str}, allele: {allele_type_str} - metadata.empty={track_data.metadata.empty}")
+            if not track_data.metadata.empty:
+                # `track_data.values` has shape (num_positions, num_tracks)
+                # `track_data.metadata` has shape (num_tracks, num_meta_cols)
+                # We need to create a DataFrame with one row per track, and an aggregated score.
+
+                # Get track names from metadata
+                track_names = track_data.metadata['name'].tolist()
+
+                processed_rows = []
+                for i, track_name in enumerate(track_names):
+                    track_scores = track_data.values[:, i]
+                    # Aggregate scores for this track over all positions in the interval
+                    # Using mean() of absolute values for aggregation
+                    aggregated_score = pd.Series(track_scores).abs().mean() if track_scores.size > 0 else 0.0
+
+                    row_dict = {
+                        'gene_name': 'N/A', # Default for generic TrackData if not gene-specific
+                        'raw_score': aggregated_score,
+                        'output_type': output_type_str,
+                        'allele_type': allele_type_str,
+                        'track_name': track_name,
+                        'ontology_curie': track_data.metadata.iloc[i].get('ontology_curie'),
+                        'biosample_name': track_data.metadata.iloc[i].get('biosample_name'),
+                    }
+
+                    if output_type_str == 'SPLICE_SITES':
+                        row_dict['junction_Start'] = None
+                        row_dict['junction_End'] = None
+                    processed_rows.append(row_dict)
+
+                if processed_rows:
+                    df_list.append(pd.DataFrame(processed_rows))
+
+        return pd.concat(df_list, ignore_index=True) if df_list else pd.DataFrame()
+
+    # Determine which attribute to retrieve from prediction_result.reference/alternate based on requested_output_type
+    # Prioritize 'rna_seq_gene_expression' for RNA_SEQ output type if available, otherwise fall back to 'rna_seq'
+    output_attribute_name = None
+    if requested_output_type == dna_client.OutputType.RNA_SEQ:
+        # First try to get gene expression data (AnnData)
+        if hasattr(prediction_result.reference, 'rna_seq_gene_expression') and getattr(prediction_result.reference, 'rna_seq_gene_expression') is not None:
+            output_attribute_name = 'rna_seq_gene_expression'
+        elif hasattr(prediction_result.reference, 'rna_seq') and getattr(prediction_result.reference, 'rna_seq') is not None:
+            # Fallback to base-level RNA-seq (TrackData)
+            output_attribute_name = 'rna_seq'
+    elif requested_output_type == dna_client.OutputType.SPLICE_SITES:
+        output_attribute_name = 'splice_sites'
+
+
+    if output_attribute_name:
+        ref_output_obj = getattr(prediction_result.reference, output_attribute_name, None)
+        alt_output_obj = getattr(prediction_result.alternate, output_attribute_name, None)
+
+        # Use 'RNA_SEQ_GENE_EXPRESSION' string for output_type if we indeed processed gene expression, else 'RNA_SEQ'
+        rna_output_type_str = 'RNA_SEQ_GENE_EXPRESSION' if output_attribute_name == 'rna_seq_gene_expression' else 'RNA_SEQ'
+
+        if requested_output_type == dna_client.OutputType.RNA_SEQ:
+            if ref_output_obj is not None:
+                rna_seq_reference_predictions_df = process_output_data(ref_output_obj, rna_output_type_str, 'reference')
+            if alt_output_obj is not None:
+                rna_seq_alternative_predictions_df = process_output_data(alt_output_obj, rna_output_type_str, 'alternative')
+        elif requested_output_type == dna_client.OutputType.SPLICE_SITES:
+            if ref_output_obj is not None:
+                splice_site_reference_predictions_df = process_output_data(ref_output_obj, 'SPLICE_SITES', 'reference')
+            if alt_output_obj is not None:
+                splice_site_alternative_predictions_df = process_output_data(alt_output_obj, 'SPLICE_SITES', 'alternative')
+
+    results = {}
+    if not rna_seq_reference_predictions_df.empty:
+        results['rna_seq_reference_predictions'] = rna_seq_reference_predictions_df
+    if not rna_seq_alternative_predictions_df.empty:
+        results['rna_seq_alternative_predictions'] = rna_seq_alternative_predictions_df
+    if not splice_site_reference_predictions_df.empty:
+        results['splice_site_reference_predictions'] = splice_site_reference_predictions_df
+    if not splice_site_alternative_predictions_df.empty:
+        results['splice_site_alternative_predictions'] = splice_site_alternative_predictions_df
+
+    return results
+
+
+# --- Step 1: Load Variants  ---
+
+# Load variants from the provided CSV file
+variants_df = pd.read_csv('/content/ABCA4variants_AlpahGenome.csv')
+
+
+# --- Step 2: Process Variants and Generate Scores ---
+
+# Lists to store DataFrames for all variants for both ref and alt alleles
+all_rna_seq_ref_dfs = []
+all_rna_seq_alt_dfs = []
+all_splice_ref_dfs = []
+all_splice_alt_dfs = []
+
+print("\nProcessing variants with corrected position:")
+for index, row in variants_df.iterrows():
+    # Ensure position is an integer
+    variant_position = int(row['position'])
+    # Ensure chromosome is a string with 'chr' prefix
+    variant_chromosome = str(row['chrom'])
+    if not variant_chromosome.startswith('chr'):
+        variant_chromosome = f'chr{variant_chromosome}'
+
+    # Validate variant position
+    if variant_position < 1:
+        print(f"\nSkipping variant {index + 1}: {variant_chromosome}:{variant_position}{row['reference_bases']}>{row['alternate_bases']} (Position must be >= 1)")
+        continue
+
+    print(f"\nProcessing variant {index + 1}: {variant_chromosome}:{variant_position}{row['reference_bases']}>{row['alternate_bases']}")
+
+    # Generate variant ID
+    variant_id = f"{variant_chromosome}:{variant_position}{row['reference_bases']}>{row['alternate_bases']}"
+
+    # Get RNA_SEQ raw scores (reference and alternative)
+    rna_seq_results = get_variant_scores(
+        chromosome=variant_chromosome,
+        position=variant_position,
+        reference_bases=row['reference_bases'],
+        alternate_bases=row['alternate_bases'],
+        requested_output_type=dna_client.OutputType.RNA_SEQ,
+        ontology_terms=['UBERON:0000019'] # Camera-type eye
+    )
+    print(f"RNA-seq results for {variant_id}: {rna_seq_results}")
+
+    if 'rna_seq_reference_predictions' in rna_seq_results and not rna_seq_results['rna_seq_reference_predictions'].empty:
+        current_rna_seq_ref_df = rna_seq_results['rna_seq_reference_predictions'].copy()
+        current_rna_seq_ref_df['variant_id'] = variant_id
+        all_rna_seq_ref_dfs.append(current_rna_seq_ref_df)
+
+    if 'rna_seq_alternative_predictions' in rna_seq_results and not rna_seq_results['rna_seq_alternative_predictions'].empty:
+        current_rna_seq_alt_df = rna_seq_results['rna_seq_alternative_predictions'].copy()
+        current_rna_seq_alt_df['variant_id'] = variant_id
+        all_rna_seq_alt_dfs.append(current_rna_seq_alt_df)
+
+
+    # Get SPLICE_SITES raw scores (reference and alternative)
+    splice_results = get_variant_scores(
+        chromosome=variant_chromosome,
+        position=variant_position,
+        reference_bases=row['reference_bases'],
+        alternate_bases=row['alternate_bases'],
+        requested_output_type=dna_client.OutputType.SPLICE_SITES,
+        ontology_terms=['UBERON:0000019'] # Camera-type eye
+    )
+    print(f"Splice site results for {variant_id}: {splice_results}")
+
+    if 'splice_site_reference_predictions' in splice_results and not splice_results['splice_site_reference_predictions'].empty:
+        current_splice_ref_df = splice_results['splice_site_reference_predictions'].copy()
+        current_splice_ref_df['variant_id'] = variant_id
+        all_splice_ref_dfs.append(current_splice_ref_df)
+
+    if 'splice_site_alternative_predictions' in splice_results and not splice_results['splice_site_alternative_predictions'].empty:
+        current_splice_alt_df = splice_results['splice_site_alternative_predictions'].copy()
+        current_splice_alt_df['variant_id'] = variant_id
+        all_splice_alt_dfs.append(current_splice_alt_df)
+
+
+# Concatenate all results into single DataFrames
+final_rna_seq_ref_scores_df = pd.concat(all_rna_seq_ref_dfs, ignore_index=True) if all_rna_seq_ref_dfs else pd.DataFrame()
+final_rna_seq_alt_scores_df = pd.concat(all_rna_seq_alt_dfs, ignore_index=True) if all_rna_seq_alt_dfs else pd.DataFrame()
+final_splice_ref_scores_df = pd.concat(all_splice_ref_dfs, ignore_index=True) if all_splice_ref_dfs else pd.DataFrame()
+final_splice_alt_scores_df = pd.concat(all_splice_alt_dfs, ignore_index=True) if all_splice_alt_dfs else pd.DataFrame()
+
+
+# --- Step 3: Prepare Splice Site Data ---
+
+# Donor Reference Scores
+donor_ref_scores_df = final_splice_ref_scores_df[final_splice_ref_scores_df['track_name'] == 'donor'][['variant_id', 'raw_score']].rename(columns={'raw_score': 'donor splice site reference score'}) if not final_splice_ref_scores_df.empty else pd.DataFrame(columns=['variant_id', 'donor splice site reference score'])
+
+# Donor Alternative Scores
+donor_alt_scores_df = final_splice_alt_scores_df[final_splice_alt_scores_df['track_name'] == 'donor'][['variant_id', 'raw_score']].rename(columns={'raw_score': 'donor splice site alternative score'}) if not final_splice_alt_scores_df.empty else pd.DataFrame(columns=['variant_id', 'donor splice site alternative score'])
+
+# Acceptor Reference Scores
+acceptor_ref_scores_df = final_splice_ref_scores_df[final_splice_ref_scores_df['track_name'] == 'acceptor'][['variant_id', 'raw_score']].rename(columns={'raw_score': 'acceptor splice site reference score'}) if not final_splice_ref_scores_df.empty else pd.DataFrame(columns=['variant_id', 'acceptor splice site reference score'])
+
+# Acceptor Alternative Scores
+acceptor_alt_scores_df = final_splice_alt_scores_df[final_splice_alt_scores_df['track_name'] == 'acceptor'][['variant_id', 'raw_score']].rename(columns={'raw_score': 'acceptor splice site alternative score'}) if not final_splice_alt_scores_df.empty else pd.DataFrame(columns=['variant_id', 'acceptor splice site alternative score'])
+
+# Merge all splice site scores
+splice_scores_pivoted_df = pd.merge(donor_ref_scores_df, donor_alt_scores_df, on='variant_id', how='outer')
+splice_scores_pivoted_df = pd.merge(splice_scores_pivoted_df, acceptor_ref_scores_df, on='variant_id', how='outer')
+splice_scores_pivoted_df = pd.merge(splice_scores_pivoted_df, acceptor_alt_scores_df, on='variant_id', how='outer')
+
+
+# --- Step 4: Prepare RNA-seq Data for ABCA4 ---
+
+# ABCA4 RNA-seq reference score
+# Since RNA_SEQ output does not provide gene names, these will be empty DataFrames.
+abca4_rna_seq_ref_df = pd.DataFrame(columns=['variant_id', 'ABCA4 RNA-seq reference score', 'gene_name'])
+abca4_rna_seq_alt_df = pd.DataFrame(columns=['variant_id', 'ABCA4 RNA-seq alternative score'])
+
+
+# --- Step 5: Combine and Display Results ---
+combined_scores_df = splice_scores_pivoted_df.copy() # Start with splice scores
+# Merge with empty ABCA4 RNA-seq dataframes, so the columns will be present but empty.
+combined_scores_df = pd.merge(combined_scores_df, abca4_rna_seq_ref_df, on='variant_id', how='left')
+combined_scores_df = pd.merge(combined_scores_df, abca4_rna_seq_alt_df, on='variant_id', how='left')
+
+
+# Define the desired order of columns
+desired_column_order = [
+    'variant_id',
+    'acceptor splice site reference score',
+    'acceptor splice site alternative score',
+    'donor splice site reference score',
+    'donor splice site alternative score',
+    'ABCA4 RNA-seq reference score',
+    'ABCA4 RNA-seq alternative score',
+    'gene_name' # From abca4_rna_seq_ref_df
+]
+# Reindex the DataFrame with the new column order
+# Handle cases where some columns might not exist if no data was found
+final_desired_columns = [col for col in desired_column_order if col in combined_scores_df.columns]
+combined_scores_df = combined_scores_df[final_desired_columns]
+
+print("\n--- Final Combined Scores Table (All Variants) ---")
+display(combined_scores_df)
+
+# --- Step 6: Save the table to CSV ---
+output_filename = 'combined_variant_raw_scores.csv' # Changed filename
+combined_scores_df.to_csv(output_filename, index=False)
+
+print(f"\nThe complete table has been saved to '{output_filename}'. You can download it from the Colab file browser.")
+
+# --- Prepare specific splice site data for Excel output ---
+# Acceptor Reference Scores
+acceptor_ref_scores_for_excel = final_splice_ref_scores_df[final_splice_ref_scores_df['track_name'] == 'acceptor'].copy()
+acceptor_ref_scores_for_excel['gene_name'] = 'ABCA4'
+acceptor_ref_scores_for_excel = acceptor_ref_scores_for_excel[['gene_name', 'variant_id', 'raw_score', 'output_type', 'allele_type']].rename(columns={'raw_score': 'acceptor splice site reference score'})
+
+# Acceptor Alternative Scores
+acceptor_alt_scores_for_excel = final_splice_alt_scores_df[final_splice_alt_scores_df['track_name'] == 'acceptor'].copy()
+acceptor_alt_scores_for_excel['gene_name'] = 'ABCA4'
+acceptor_alt_scores_for_excel = acceptor_alt_scores_for_excel[['gene_name', 'variant_id', 'raw_score', 'output_type', 'allele_type']].rename(columns={'raw_score': 'acceptor splice site alternative score'})
+
+# Donor Reference Scores
+donor_ref_scores_for_excel = final_splice_ref_scores_df[final_splice_ref_scores_df['track_name'] == 'donor'].copy()
+donor_ref_scores_for_excel['gene_name'] = 'ABCA4'
+donor_ref_scores_for_excel = donor_ref_scores_for_excel[['gene_name', 'variant_id', 'raw_score', 'output_type', 'allele_type']].rename(columns={'raw_score': 'donor splice site reference score'})
+
+# Donor Alternative Scores
+donor_alt_scores_for_excel = final_splice_alt_scores_df[final_splice_alt_scores_df['track_name'] == 'donor'].copy()
+donor_alt_scores_for_excel['gene_name'] = 'ABCA4'
+donor_alt_scores_for_excel = donor_alt_scores_for_excel[['gene_name', 'variant_id', 'raw_score', 'output_type', 'allele_type']].rename(columns={'raw_score': 'donor splice site alternative score'})
+
+# --- Prepare RNA-seq data for Excel output ---
+rna_seq_ref_scores_for_excel = final_rna_seq_ref_scores_df.copy()
+rna_seq_ref_scores_for_excel['gene_name'] = 'ABCA4' # Set gene name to ABCA4
+rna_seq_ref_scores_for_excel = rna_seq_ref_scores_for_excel[['gene_name', 'variant_id', 'raw_score', 'output_type', 'allele_type']]
+
+rna_seq_alt_scores_for_excel = final_rna_seq_alt_scores_df.copy()
+rna_seq_alt_scores_for_excel['gene_name'] = 'ABCA4' # Set gene name to ABCA4
+rna_seq_alt_scores_for_excel = rna_seq_alt_scores_for_excel[['gene_name', 'variant_id', 'raw_score', 'output_type', 'allele_type']]
+
+
+# --- Create Excel output ---
+output_excel_filename = 'all_raw_scores.xlsx'
+
+with pd.ExcelWriter(output_excel_filename) as writer:
+    rna_seq_ref_scores_for_excel.to_excel(writer, sheet_name='RNA_Seq_Reference_Scores', index=False)
+    rna_seq_alt_scores_for_excel.to_excel(writer, sheet_name='RNA_Seq_Alternative_Scores', index=False)
+    acceptor_ref_scores_for_excel.to_excel(writer, sheet_name='Acceptor_Ref_Scores', index=False)
+    acceptor_alt_scores_for_excel.to_excel(writer, sheet_name='Acceptor_Alt_Scores', index=False)
+    donor_ref_scores_for_excel.to_excel(writer, sheet_name='Donor_Ref_Scores', index=False)
+    donor_alt_scores_for_excel.to_excel(writer, sheet_name='Donor_Alt_Scores', index=False)
+
+print(f"All raw scores have been saved to '{output_excel_filename}'. You can download it from the Colab file browser.")
