@@ -1,0 +1,244 @@
+# Imports
+from IPython.display import clear_output
+from alphagenome import colab_utils
+from alphagenome.data import gene_annotation
+from alphagenome.data import genome
+from alphagenome.data import transcript as transcript_utils
+from alphagenome.interpretation import ism
+from alphagenome.models import dna_client
+from alphagenome.models import variant_scorers
+from alphagenome.visualization import plot_components
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Consolidate all steps into a single function
+def get_variant_scores(
+    chromosome,
+    position,
+    reference_bases,
+    alternate_bases,
+    requested_output_type=dna_client.OutputType.RNA_SEQ, # Make output type configurable
+    variant_scorer_key='RNA_SEQ', # Make scorer key configurable
+    ontology_terms=['UBERON:0000019'],  # Make ontology terms configurable
+    custom_prediction_interval_chr=None,
+    custom_prediction_interval_start=None,
+    custom_prediction_interval_end=None,
+    custom_prediction_interval_strand=None
+):
+    # Ensure necessary imports are available
+    # These are already in the main script now, but good to keep local imports for function's portability
+    from alphagenome import colab_utils
+    from alphagenome.data import gene_annotation
+    from alphagenome.data import genome
+    from alphagenome.data import transcript as transcript_utils
+    from alphagenome.models import dna_client
+    from alphagenome.models import variant_scorers
+    import pandas as pd
+
+    # 1. Initialize DNA model (using your API key)
+    dna_model = dna_client.create(colab_utils.get_api_key())
+
+    # 2. Load GTF file and set up transcript extractor
+    gtf = pd.read_feather(
+        'https://storage.googleapis.com/alphagenome/reference/gencode/'
+        'hg38/gencode.v46.annotation.gtf.gz.feather'
+    )
+    gtf_transcripts = gene_annotation.filter_protein_coding(gtf)
+    gtf_transcripts = gene_annotation.filter_to_mane_select_transcript(gtf_transcripts)
+    transcript_extractor = transcript_utils.TranscriptExtractor(gtf_transcripts)
+
+    # 3. Define the variant
+    variant = genome.Variant(
+        chromosome=chromosome,
+        position=position,
+        reference_bases=reference_bases,
+        alternate_bases=alternate_bases,
+    )
+
+    # 4. Determine the interval for prediction
+    if (
+        custom_prediction_interval_chr is not None
+        and custom_prediction_interval_start is not None
+        and custom_prediction_interval_end is not None
+    ):
+        # User provided a custom interval
+        interval = genome.Interval(
+            chromosome=custom_prediction_interval_chr,
+            start=custom_prediction_interval_start,
+            end=custom_prediction_interval_end,
+            strand=custom_prediction_interval_strand if custom_prediction_interval_strand is not None else '.',
+            name=f"Custom prediction interval for {chromosome}:{position}{reference_bases}>{alternate_bases}"
+        )
+        # It's good practice to ensure the variant is within this interval.
+        # If not, the model might not function as expected or raise an error.
+        if not interval.contains(variant.reference_interval):
+             raise ValueError(
+                 f"Variant {variant} is not contained within the custom prediction interval {interval}"
+             )
+    else:
+        # Default behavior: create a a 1MB region centered around the variant
+        interval = variant.reference_interval.resize(dna_client.SUPPORTED_SEQUENCE_LENGTHS['SEQUENCE_LENGTH_1MB'])
+
+    # 5. Predict variant effects
+    variant_output = dna_model.predict_variant(
+        interval=interval,
+        variant=variant,
+        requested_outputs=[requested_output_type],
+        ontology_terms=ontology_terms,
+    )
+
+    # 6. Score the variant
+    variant_scorer = variant_scorers.RECOMMENDED_VARIANT_SCORERS[variant_scorer_key]
+    variant_scores = dna_model.score_variant(
+        interval=interval,
+        variant=variant,
+        variant_scorers=[variant_scorer]
+    )
+
+    # 7. Convert scores to tidy DataFrame and filter for specified ontology_terms
+    if variant_scores:
+        variant_scores_anndata = variant_scores[0]
+        tidy_variant_scores = variant_scorers.tidy_scores([variant_scores_anndata], match_gene_strand=True)
+
+        if tidy_variant_scores is None: # Added check for None
+            return pd.DataFrame(columns=['gene_name', 'raw_score', 'output_type', 'track_name'])
+
+        # Initialize filtered_scores with the full tidy_variant_scores
+        filtered_scores = tidy_variant_scores
+
+        # Only filter by ontology_curie if the column exists AND it's not SPLICE_SITES (where filtering might not be relevant)
+        if 'ontology_curie' in tidy_variant_scores.columns and requested_output_type != dna_client.OutputType.SPLICE_SITES:
+            filtered_scores = tidy_variant_scores[tidy_variant_scores['ontology_curie'].isin(ontology_terms)]
+
+        # Dynamically determine columns to return
+        # Start with common columns
+        columns_to_return_if_present = ['gene_name', 'raw_score', 'output_type', 'track_name']
+
+        # Add ontology-related columns if they exist
+        if 'ontology_curie' in filtered_scores.columns:
+            columns_to_return_if_present.append('ontology_curie')
+        if 'biosample_name' in filtered_scores.columns:
+            columns_to_return_if_present.append('biosample_name')
+
+        # Add splicing-specific columns if they exist
+        if requested_output_type == dna_client.OutputType.SPLICE_SITES:
+            if 'junction_Start' in filtered_scores.columns:
+                columns_to_return_if_present.append('junction_Start')
+            if 'junction_End' in filtered_scores.columns:
+                columns_to_return_if_present.append('junction_End')
+
+        # Filter the list to only include columns that are actually present in the DataFrame
+        final_columns = [col for col in columns_to_return_if_present if col in filtered_scores.columns]
+
+        return filtered_scores[final_columns]
+    else:
+        # Return an empty DataFrame with minimal common columns if no scores are found
+        return pd.DataFrame(columns=['gene_name', 'raw_score', 'output_type', 'track_name'])
+
+# --- Step 1: Define Variant Input Fields ---
+# @markdown ### Enter Variant Information:
+variant_chromosome = 'chr19'  # @param {type: "string"}
+variant_position = 54115466 # @param {type: "integer"}
+variant_reference_bases = 'GC' # @param {type: "string"}
+variant_alternate_bases = 'G' # @param {type: "string"}
+gene_name = 'PRPF31' # @param {type: "string"}
+
+# --- Step 2: Process the Single Variant and Generate Scores ---
+
+all_rna_seq_scores = []
+all_splice_scores_general = []
+
+print(f"\nProcessing variant: {variant_chromosome}:{variant_position}{variant_reference_bases}>{variant_alternate_bases}")
+
+# Construct variant identifier for logging and score storage
+variant_id_ref_alt = f"{variant_chromosome}:{variant_position}{variant_reference_bases}>{variant_alternate_bases}"
+
+# Get RNA_SEQ scores for REF > ALT
+rna_seq_scores = get_variant_scores(
+    chromosome=variant_chromosome,
+    position=variant_position,
+    reference_bases=variant_reference_bases,
+    alternate_bases=variant_alternate_bases,
+    requested_output_type=dna_client.OutputType.RNA_SEQ,
+    variant_scorer_key='RNA_SEQ',
+    ontology_terms=['UBERON:0000019'] # Camera-type eye
+)
+
+# Filter RNA-seq scores for the specific gene provided in the input field
+specific_gene_name = gene_name
+rna_seq_score_for_specific_gene = None
+
+if not rna_seq_scores.empty and 'gene_name' in rna_seq_scores.columns:
+    filtered_rna_score_row = rna_seq_scores[rna_seq_scores['gene_name'] == specific_gene_name]
+    if not filtered_rna_score_row.empty:
+        # Take the first score if multiple exist for the same gene (e.g., different isoforms)
+        rna_seq_score_for_specific_gene = filtered_rna_score_row['raw_score'].iloc[0]
+
+# Create a DataFrame for this specific variant's RNA-seq score
+# This ensures a single entry per variant for RNA-seq, for the specified gene
+rna_seq_single_score_df = pd.DataFrame([{
+    'variant_id': variant_id_ref_alt,
+    'raw_score': rna_seq_score_for_specific_gene,
+    'gene_name': specific_gene_name
+}])
+all_rna_seq_scores.append(rna_seq_single_score_df)
+
+# Get general SPLICE_SITES scores for REF > ALT
+splice_scores = get_variant_scores(
+    chromosome=variant_chromosome,
+    position=variant_position,
+    reference_bases=variant_reference_bases,
+    alternate_bases=variant_alternate_bases,
+    requested_output_type=dna_client.OutputType.SPLICE_SITES,
+    variant_scorer_key='SPLICE_SITES',
+    ontology_terms=['UBERON:0000019'] # Camera-type eye
+)
+# Add variant identifier to the scores, reflecting REF > ALT
+splice_scores['variant_id'] = variant_id_ref_alt
+all_splice_scores_general.append(splice_scores)
+
+# Concatenate all results into a single DataFrame
+final_rna_seq_scores_df = pd.concat(all_rna_seq_scores, ignore_index=True) if all_rna_seq_scores else pd.DataFrame()
+final_splice_scores_df = pd.concat(all_splice_scores_general, ignore_index=True) if all_splice_scores_general else pd.DataFrame()
+
+# --- Step 3: Prepare Splice Site Data ---
+
+if not final_splice_scores_df.empty:
+    donor_scores_df = final_splice_scores_df[final_splice_scores_df['track_name'] == 'donor'][['variant_id', 'raw_score']].rename(columns={'raw_score': 'donor splice site score'})
+    acceptor_scores_df = final_splice_scores_df[final_splice_scores_df['track_name'] == 'acceptor'][['variant_id', 'raw_score']].rename(columns={'raw_score': 'acceptor splice site score'})
+    splice_scores_pivoted_df = pd.merge(donor_scores_df, acceptor_scores_df, on='variant_id', how='outer')
+else:
+    splice_scores_pivoted_df = pd.DataFrame(columns=['variant_id', 'donor splice site score', 'acceptor splice site score'])
+
+# --- Step 4: Prepare RNA-seq Data for specified gene ---
+
+# Use the already filtered RNA-seq scores, rename column for clarity
+if not final_rna_seq_scores_df.empty:
+    rna_seq_scores_for_display_df = final_rna_seq_scores_df[['variant_id', 'raw_score', 'gene_name']].rename(columns={'raw_score': 'Gene RNA-seq score'})
+else:
+    rna_seq_scores_for_display_df = pd.DataFrame(columns=['variant_id', 'Gene RNA-seq score', 'gene_name'])
+
+# --- Step 5: Combine and Display Results ---
+
+combined_scores_df = pd.merge(splice_scores_pivoted_df, rna_seq_scores_for_display_df, on='variant_id', how='left')
+
+# Define the desired order of columns
+desired_column_order = [
+    'variant_id',
+    'acceptor splice site score',
+    'donor splice site score',
+    'Gene RNA-seq score', # Updated column name
+    'gene_name'
+]
+# Reindex the DataFrame with the new column order, ensuring all columns exist before selecting
+existing_columns = [col for col in desired_column_order if col in combined_scores_df.columns]
+combined_scores_df = combined_scores_df[existing_columns]
+
+print("\n--- Final Combined Scores Table (Single Variant) ---")
+display(combined_scores_df)
+
+# --- Step 6: Save the table to CSV ---
+output_filename = 'combined_variant_scores.csv'
+combined_scores_df.to_csv(output_filename, index=False)
+
+print(f"The complete table has been saved to '{output_filename}'. You can download it from the Colab file browser.")
