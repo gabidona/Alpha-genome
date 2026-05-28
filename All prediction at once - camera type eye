@@ -14,8 +14,8 @@ print("DNA model initialized.")
 # @title Define your non-coding variant
 # You can change these values to specify the non-coding variant you want to score.
 chromosome = 'chr1' # @param {type: "string"}
-position = 9943503 # @param {type: "integer"}
-reference_bases = 'C' # @param {type: "string"}
+position = 215662337 # @param {type: "integer"}
+reference_bases = 'G' # @param {type: "string"}
 alternate_bases = 'T' # @param {type: "string"}
 
 # Create a genome.Variant object
@@ -106,6 +106,14 @@ plot_components.plot(
             },
             colors={'REF': 'dimgrey', 'ALT': 'red'},
             label='RNA-seq'
+        ),
+        plot_components.OverlaidTracks(
+            tdata={
+                'REF_CAGE': non_coding_variant_output.reference.cage,
+                'ALT_CAGE': non_coding_variant_output.alternate.cage,
+            },
+            colors={'REF_CAGE': 'purple', 'ALT_CAGE': 'darkmagenta'},
+            label='CAGE'
         ),
         plot_components.OverlaidTracks(
             tdata={
