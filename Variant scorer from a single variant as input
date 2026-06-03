@@ -136,12 +136,19 @@ def get_variant_scores(
         return pd.DataFrame(columns=['gene_name', 'raw_score', 'output_type', 'track_name'])
 
 # --- Step 1: Define Variant Input Fields ---
-# @markdown ### Enter Variant Information:
-variant_chromosome = 'chr19'  # @param {type: "string"}
-variant_position = 54115466 # @param {type: "integer"}
-variant_reference_bases = 'GC' # @param {type: "string"}
-variant_alternate_bases = 'G' # @param {type: "string"}
-gene_name = 'PRPF31' # @param {type: "string"}
+# @markdown ### Enter Variant Information as a single string (e.g., "chr1:216325499:G:T"):
+variant_input_string = 'chr1:94011393:A:C' # @param {type: "string"}
+gene_name = 'ABCA4' # @param {type: "string"}
+
+# Parse the variant input string
+parts = variant_input_string.split(':')
+if len(parts) == 4:
+    variant_chromosome = parts[0]
+    variant_position = int(parts[1])
+    variant_reference_bases = parts[2]
+    variant_alternate_bases = parts[3]
+else:
+    raise ValueError("Invalid variant input string format. Expected 'chr:pos:ref:alt'.")
 
 # --- Step 2: Process the Single Variant and Generate Scores ---
 
